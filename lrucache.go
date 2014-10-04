@@ -57,7 +57,7 @@
 // values at different points in time; updating the value of a pointer after
 // caching it will change the cached value.
 //
-package lrucache
+package lru
 
 import (
 	"errors"
@@ -113,7 +113,7 @@ const (
 )
 
 // Optional interface for cached objects
-type NotifyPurge interface {
+type OnPurger interface {
 	// Called once when the element is purged from cache. The argument
 	// indicates why.
 	//
@@ -154,6 +154,11 @@ type replyGet struct {
 	err error
 }
 
+type replyItems struct {
+	vals []Cacheable
+	err  error
+}
+
 type reqGet struct {
 	id string
 	// If the key is found the value is pushed down this channel after which it
@@ -171,6 +176,10 @@ type reqOnMissFunc OnMissHandler
 
 type reqMaxSize int64
 
+type reqItems struct {
+	reply chan<- replyItems
+}
+
 type reqGetSize chan<- int64
 
 type cacheEntry struct {
@@ -182,9 +191,9 @@ type cacheEntry struct {
 	younger *cacheEntry
 }
 
-// Only call c.OnPurge() if c implements NotifyPurge.
+// Only call c.OnPurge() if c implements OnPurger.
 func safeOnPurge(c Cacheable, why PurgeReason) {
-	if t, ok := c.(NotifyPurge); ok {
+	if t, ok := c.(OnPurger); ok {
 		t.OnPurge(why)
 	}
 	return
@@ -315,6 +324,17 @@ func directGet(c *Cache, req reqGet) {
 	return
 }
 
+// Not safe for use in concurrent goroutines
+func directItems(c *Cache, req reqItems) {
+	reply := replyItems{}
+	for _, e := range c.entries {
+		reply.vals = append(reply.vals, e.payload)
+	}
+	req.reply <- reply
+	close(req.reply)
+	return
+}
+
 // Consume an operation from the channel and process it. Returns false if the
 // channel was closed and the main loop should stop.
 //
@@ -346,6 +366,8 @@ func mainLoopBody(opchan <-chan operation) bool {
 		directDelete(c, req)
 	case reqGet:
 		directGet(c, req)
+	case reqItems:
+		directItems(c, req)
 	case reqOnMissFunc:
 		c.onMiss = OnMissHandler(req)
 	case reqMaxSize:
@@ -403,6 +425,17 @@ func (c *Cache) Delete(id string) {
 func (c *Cache) Close() error {
 	finalizeCache(c)
 	return nil
+}
+
+// Items returns a list of all values currently stored in the cache.  It is
+// idempotent and has no effect on item ordering within the cache.  The values
+// are returned in no particular order.
+func (c *Cache) Items() ([]Cacheable, error) {
+	replychan := make(chan replyItems)
+	req := reqItems{reply: replychan}
+	c.opChan <- operation{c, req}
+	reply := <-replychan
+	return reply.vals, reply.err
 }
 
 // Used to populate the cache if an entry is not found.  Say you're looking
