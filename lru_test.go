@@ -39,10 +39,14 @@ func (i varsize) Size() int64 {
 type purgeable struct {
 	purged bool
 	why    PurgeReason
+	size   int64
 }
 
 func (x *purgeable) Size() int64 {
-	return 1
+	if x.size == 0 {
+		return 1
+	}
+	return x.size
 }
 
 func (x *purgeable) OnPurge(why PurgeReason) {
@@ -63,6 +67,22 @@ func TestOnPurge_1(t *testing.T) {
 	syncCache(c)
 	if !x.purged {
 		t.Error("Element was not purged from full cache")
+	}
+	if x.why != CACHEFULL {
+		t.Error("Element should have been purged but was deleted")
+	}
+
+	verifyIntegrity(t, c)
+}
+
+func TestOnPurge_TooLarge(t *testing.T) {
+	c := New(1)
+	defer c.Close()
+	x := purgeable{size: 2}
+	c.Set("x", &x)
+	syncCache(c)
+	if !x.purged {
+		t.Error("Element was not purged from undersized cache")
 	}
 	if x.why != CACHEFULL {
 		t.Error("Element should have been purged but was deleted")
